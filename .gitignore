@@ -1,0 +1,11 @@
+/target
+/target-trunk
+/.idea
+/esp32c6
+/rust-project-barsik-the-cat
+/barsik.db
+/nul
+/frontend/dist
+/frontend/target
+/.agents
+/.codex
