@@ -5,13 +5,26 @@ use wasm_bindgen_futures::spawn_local;
 use crate::api;
 use crate::components::bottom_navigation::BottomNavigation;
 use crate::pages::{
-    calendar::SchedulePage, feed::FeedNowPage, home::HomePage, notifications::NotificationsPage,
+    calendar::SchedulePage,
+    feed::FeedNowPage,
+    home::HomePage,
+    notifications::NotificationsPage,
     settings::SettingsPage,
+    setup::{
+        AddFeederPage, BluetoothScanPage, FeederListPage, ServerSetupPage, WifiSetupPage,
+        WifiSetupQuestionPage,
+    },
 };
 use crate::styles::Styles;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Page {
+    FeederList,
+    AddFeeder,
+    BluetoothScan,
+    WifiSetupQuestion,
+    WifiSetup,
+    ServerSetup,
     Home,
     FeedNow,
     Schedule,
@@ -46,7 +59,18 @@ pub struct ActivityEvent {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+pub struct FeederDevice {
+    pub id: u32,
+    pub name: String,
+    pub connection: String,
+    pub status: String,
+    pub hopper_level: u8,
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct AppState {
+    pub feeders: Vec<FeederDevice>,
+    pub selected_feeder_id: Option<u32>,
     pub cat_name: String,
     pub cat_photo: String,
     pub feeder_connected: bool,
@@ -64,6 +88,23 @@ pub struct AppState {
 impl AppState {
     pub fn demo() -> Self {
         Self {
+            feeders: vec![
+                FeederDevice {
+                    id: 1,
+                    name: String::from("Barsik feeder"),
+                    connection: String::from("Wi-Fi"),
+                    status: String::from("Online"),
+                    hopper_level: 78,
+                },
+                FeederDevice {
+                    id: 2,
+                    name: String::from("Kitchen backup"),
+                    connection: String::from("Bluetooth"),
+                    status: String::from("Setup needed"),
+                    hopper_level: 42,
+                },
+            ],
+            selected_feeder_id: None,
             cat_name: String::from("Barsik"),
             cat_photo: String::from("assets/image.png"),
             feeder_connected: true,
@@ -200,6 +241,38 @@ impl AppState {
         self.schedule.retain(|entry| entry.id != schedule_id);
         self.schedule_error = None;
     }
+
+    pub fn select_feeder(&mut self, feeder_id: u32) {
+        self.selected_feeder_id = Some(feeder_id);
+        if let Some(feeder) = self.feeders.iter().find(|feeder| feeder.id == feeder_id) {
+            self.hopper_level = feeder.hopper_level;
+            self.feeder_connected = feeder.status == "Online";
+            self.push_event(
+                String::from("Feeder selected"),
+                feeder.name.clone(),
+                String::from("Now"),
+                EventTone::Info,
+            );
+        }
+    }
+
+    pub fn add_demo_feeder(&mut self, name: String, connection: String) -> u32 {
+        let next_id = self
+            .feeders
+            .iter()
+            .map(|feeder| feeder.id)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        self.feeders.push(FeederDevice {
+            id: next_id,
+            name,
+            connection,
+            status: String::from("Online"),
+            hopper_level: 100,
+        });
+        next_id
+    }
 }
 
 pub fn portion_text(portions: u8) -> String {
@@ -283,7 +356,7 @@ pub fn sync_schedules(set_app_state: WriteSignal<AppState>) {
 
 #[component]
 pub fn App() -> impl IntoView {
-    let (page, set_page) = signal(Page::Home);
+    let (page, set_page) = signal(Page::FeederList);
     let (app_state, set_app_state) = signal(AppState::demo());
     let (did_bootstrap, set_did_bootstrap) = signal(false);
 
@@ -299,6 +372,69 @@ pub fn App() -> impl IntoView {
         <div class="app-shell">
             <main class="content">
                 {move || match page.get() {
+                    Page::FeederList => {
+                        view! {
+                            <FeederListPage
+                                app_state=app_state
+                                set_app_state=set_app_state
+                                on_add=move || set_page.set(Page::AddFeeder)
+                                on_open=move || {
+                                    sync_schedules(set_app_state);
+                                    set_page.set(Page::Home);
+                                }
+                            />
+                        }
+                            .into_any()
+                    }
+                    Page::AddFeeder => {
+                        view! {
+                            <AddFeederPage
+                                on_back=move || set_page.set(Page::FeederList)
+                                on_bluetooth=move || set_page.set(Page::BluetoothScan)
+                                on_wifi=move || set_page.set(Page::ServerSetup)
+                            />
+                        }
+                            .into_any()
+                    }
+                    Page::BluetoothScan => {
+                        view! {
+                            <BluetoothScanPage
+                                on_back=move || set_page.set(Page::AddFeeder)
+                                on_continue=move || set_page.set(Page::WifiSetupQuestion)
+                            />
+                        }
+                            .into_any()
+                    }
+                    Page::WifiSetupQuestion => {
+                        view! {
+                            <WifiSetupQuestionPage
+                                on_back=move || set_page.set(Page::BluetoothScan)
+                                on_yes=move || set_page.set(Page::WifiSetup)
+                                on_skip=move || set_page.set(Page::Home)
+                            />
+                        }
+                            .into_any()
+                    }
+                    Page::WifiSetup => {
+                        view! {
+                            <WifiSetupPage
+                                set_app_state=set_app_state
+                                on_back=move || set_page.set(Page::WifiSetupQuestion)
+                                on_connected=move || set_page.set(Page::ServerSetup)
+                            />
+                        }
+                            .into_any()
+                    }
+                    Page::ServerSetup => {
+                        view! {
+                            <ServerSetupPage
+                                set_app_state=set_app_state
+                                on_back=move || set_page.set(Page::AddFeeder)
+                                on_done=move || set_page.set(Page::Home)
+                            />
+                        }
+                            .into_any()
+                    }
                     Page::Home => {
                         view! {
                             <HomePage
@@ -339,7 +475,7 @@ pub fn App() -> impl IntoView {
                 }}
             </main>
 
-            <Show when=move || !matches!(page.get(), Page::FeedNow | Page::Schedule)>
+            <Show when=move || matches!(page.get(), Page::Home | Page::Notifications | Page::Settings)>
                 <BottomNavigation current_page=page set_page=set_page />
             </Show>
         </div>

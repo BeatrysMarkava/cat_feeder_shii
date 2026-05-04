@@ -107,6 +107,10 @@ impl Styles {
             margin-bottom: 18px;
         }
 
+        .hero-card-single {
+            grid-template-columns: 1fr;
+        }
+
         .hero-copy {
             display: flex;
             flex-direction: column;
@@ -445,9 +449,91 @@ impl Styles {
 
         .schedule-form,
         .schedule-actions,
-        .portion-picker {
+        .portion-picker,
+        .setup-list {
             display: grid;
             gap: 14px;
+        }
+
+        .setup-card {
+            width: 100%;
+            min-height: 76px;
+            padding: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            text-align: left;
+            border: 1px solid var(--border);
+            border-radius: 22px;
+            background: var(--panel-strong);
+            color: var(--ink);
+        }
+
+        .setup-card-title {
+            font-size: 17px;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+
+        .setup-card-copy {
+            color: var(--muted);
+            font-size: 14px;
+            line-height: 1.4;
+        }
+
+        .setup-main-action {
+            margin-top: 16px;
+        }
+
+        .setup-loader {
+            min-height: 180px;
+            display: grid;
+            place-items: center;
+            align-content: center;
+            gap: 14px;
+        }
+
+        .setup-spinner {
+            width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            border: 4px solid rgba(242, 106, 61, 0.18);
+            border-top-color: var(--primary);
+            animation: setup-spin 900ms linear infinite;
+        }
+
+        .setup-modal-backdrop {
+            position: fixed;
+            inset: 0;
+            z-index: 20;
+            display: flex;
+            align-items: flex-end;
+            justify-content: center;
+            padding: 18px;
+            background: rgba(45, 33, 24, 0.28);
+        }
+
+        .setup-modal {
+            width: 100%;
+            max-width: 404px;
+            padding: 18px;
+            display: grid;
+            gap: 14px;
+            border-radius: 24px;
+            border: 1px solid var(--border);
+            background: var(--panel-strong);
+            box-shadow: var(--shadow);
+        }
+
+        .setup-cancel {
+            justify-self: center;
+        }
+
+        @keyframes setup-spin {
+            to {
+                transform: rotate(360deg);
+            }
         }
 
         .schedule-card {
