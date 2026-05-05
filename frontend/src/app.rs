@@ -273,6 +273,19 @@ impl AppState {
         });
         next_id
     }
+
+    pub fn clear_selected_feeder(&mut self) {
+        self.selected_feeder_id = None;
+        self.schedule.clear();
+        self.schedule_loading = false;
+        self.schedule_error = None;
+        self.push_event(
+            String::from("Feeder selection cleared"),
+            String::from("Returned to feeder list"),
+            String::from("Now"),
+            EventTone::Info,
+        );
+    }
 }
 
 pub fn portion_text(portions: u8) -> String {
@@ -354,6 +367,12 @@ pub fn sync_schedules(set_app_state: WriteSignal<AppState>) {
     });
 }
 
+fn log_client_action(action: &'static str, detail: Option<String>) {
+    spawn_local(async move {
+        let _ = api::track_client_action(action, detail).await;
+    });
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let (page, set_page) = signal(Page::FeederList);
@@ -379,6 +398,7 @@ pub fn App() -> impl IntoView {
                                 set_app_state=set_app_state
                                 on_add=move || set_page.set(Page::AddFeeder)
                                 on_open=move || {
+                                    log_client_action("feeder_selected", None);
                                     sync_schedules(set_app_state);
                                     set_page.set(Page::Home);
                                 }
@@ -439,8 +459,14 @@ pub fn App() -> impl IntoView {
                         view! {
                             <HomePage
                                 app_state=app_state
-                                on_feed_now=move || set_page.set(Page::FeedNow)
-                                on_open_schedule=move || set_page.set(Page::Schedule)
+                                on_feed_now=move || {
+                                    log_client_action("open_feed_now", None);
+                                    set_page.set(Page::FeedNow);
+                                }
+                                on_open_schedule=move || {
+                                    log_client_action("open_schedule", None);
+                                    set_page.set(Page::Schedule);
+                                }
                             />
                         }
                             .into_any()
@@ -469,7 +495,13 @@ pub fn App() -> impl IntoView {
                         view! { <NotificationsPage app_state=app_state /> }.into_any()
                     }
                     Page::Settings => {
-                        view! { <SettingsPage app_state=app_state set_app_state=set_app_state /> }
+                        view! {
+                            <SettingsPage
+                                app_state=app_state
+                                set_app_state=set_app_state
+                                on_feeder_list=move || set_page.set(Page::FeederList)
+                            />
+                        }
                             .into_any()
                     }
                 }}

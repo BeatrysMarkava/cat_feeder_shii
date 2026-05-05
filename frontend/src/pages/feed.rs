@@ -56,9 +56,13 @@ where
 
         let selected = portion.get();
         set_is_sending.set(true);
-        set_delivery_status.set(String::from("Sending command to server..."));
+        set_delivery_status.set(String::from("Sending command to server."));
 
         spawn_local(async move {
+            let _ =
+                api::track_client_action("feed_now_clicked", Some(format!("portion={selected}")))
+                    .await;
+
             match api::create_feed_now_command(selected).await {
                 Ok(command) => {
                     set_app_state.update(|state| {
@@ -70,10 +74,14 @@ where
                         );
                     });
                     set_delivery_status.set(format!(
-                        "Command #{} queued. Waiting for delivery confirmation.",
+                        "Command #{} queued. Waiting until food is dispensed.",
                         command.id
                     ));
-                    set_was_dispensed.set(true);
+                    let _ = api::track_client_action(
+                        "feed_now_queued",
+                        Some(format!("command_id={}, portion={selected}", command.id)),
+                    )
+                    .await;
 
                     let mut finished = false;
                     for _ in 0..40 {
@@ -83,17 +91,31 @@ where
                             Ok(updated) => match updated.status.as_str() {
                                 "completed" => {
                                     set_app_state.update(|state| state.feed_now(selected));
-                                    set_delivery_status.set(String::from("Food is ready."));
+                                    set_delivery_status.set(String::from(
+                                        "Food was dispensed. Returning to the menu.",
+                                    ));
+                                    set_was_dispensed.set(true);
+                                    let _ = api::track_client_action(
+                                        "feed_now_completed",
+                                        Some(format!(
+                                            "command_id={}, portion={selected}",
+                                            updated.id
+                                        )),
+                                    )
+                                    .await;
+                                    sleep_ms(1_200).await;
+                                    on_back();
                                     finished = true;
                                     break;
                                 }
                                 "failed" => {
+                                    let message = updated.message.unwrap_or_else(|| {
+                                        String::from("ESP32-C6 did not confirm delivery")
+                                    });
                                     set_app_state.update(|state| {
                                         state.push_event(
                                             String::from("Feed command failed"),
-                                            updated.message.unwrap_or_else(|| {
-                                                String::from("ESP32-C6 did not confirm delivery")
-                                            }),
+                                            message.clone(),
                                             String::from("Just now"),
                                             EventTone::Warning,
                                         );
@@ -102,6 +124,17 @@ where
                                         "Delivery failed after {}/{} attempts.",
                                         updated.retry_count, updated.max_attempts
                                     ));
+                                    let _ = api::track_client_action(
+                                        "feed_now_failed",
+                                        Some(format!(
+                                            "command_id={}, retry={}/{}, message={}",
+                                            updated.id,
+                                            updated.retry_count,
+                                            updated.max_attempts,
+                                            message
+                                        )),
+                                    )
+                                    .await;
                                     finished = true;
                                     break;
                                 }
@@ -131,9 +164,15 @@ where
                         set_delivery_status.set(String::from(
                             "Still waiting for ESP32-C6 confirmation. Check command status again later.",
                         ));
+                        let _ = api::track_client_action(
+                            "feed_now_wait_timeout",
+                            Some(format!("command_id={}", command.id)),
+                        )
+                        .await;
                     }
                 }
                 Err(error) => {
+                    let detail = error.clone();
                     set_app_state.update(|state| {
                         state.push_event(
                             String::from("Feed command failed"),
@@ -142,6 +181,8 @@ where
                             EventTone::Warning,
                         );
                     });
+                    set_delivery_status.set(String::from("Could not send feed command."));
+                    let _ = api::track_client_action("feed_now_error", Some(detail)).await;
                 }
             }
 
@@ -151,6 +192,7 @@ where
 
     let feed_again = move |_| {
         set_was_dispensed.set(false);
+        set_delivery_status.set(String::new());
     };
 
     view! {
@@ -168,7 +210,7 @@ where
                         <div class="success-panel">
                             <p class="eyebrow">"Command queued"</p>
                             <h2 class="success-title">
-                                {move || format!("ESP32-C6 will dispense {}", portion_text(portion.get()))}
+                                {move || format!("{} was fed", app_state.get().cat_name)}
                             </h2>
                             <p class="success-copy">
                                 {move || {
@@ -244,12 +286,16 @@ where
                             >
                                 {move || {
                                     if is_sending.get() {
-                                        String::from("Sending command...")
+                                        String::from("Waiting for feeder...")
                                     } else {
                                         format!("Dispense {}", portion_text(portion.get()))
                                     }
                                 }}
                             </button>
+
+                            <Show when=move || !delivery_status.get().is_empty()>
+                                <p class="panel-subtitle">{move || delivery_status.get()}</p>
+                            </Show>
                         </div>
                     }
                         .into_any()

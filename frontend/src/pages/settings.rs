@@ -8,10 +8,14 @@ use web_sys::{FileReader, HtmlInputElement};
 use crate::app::{AppState, EventTone};
 
 #[component]
-pub fn SettingsPage(
+pub fn SettingsPage<F>(
     app_state: ReadSignal<AppState>,
     set_app_state: WriteSignal<AppState>,
-) -> impl IntoView {
+    on_feeder_list: F,
+) -> impl IntoView
+where
+    F: Fn() + Copy + 'static,
+{
     let input_ref = NodeRef::<html::Input>::new();
 
     let open_picker = move |_| {
@@ -114,6 +118,11 @@ pub fn SettingsPage(
         set_app_state.update(|state| state.refill_hopper());
     };
 
+    let return_to_feeders = move |_| {
+        set_app_state.update(|state| state.clear_selected_feeder());
+        on_feeder_list();
+    };
+
     view! {
         <section class="page">
             <div class="settings-hero">
@@ -197,6 +206,16 @@ pub fn SettingsPage(
                         </span>
                     </div>
                     <span class="settings-tag enabled">"Fill"</span>
+                </button>
+
+                <button class="settings-action" on:click=return_to_feeders>
+                    <div>
+                        <span class="settings-label">"Switch feeder"</span>
+                        <span class="settings-hint">
+                            "Return to the feeder selection screen."
+                        </span>
+                    </div>
+                    <span class="settings-arrow">">"</span>
                 </button>
             </div>
 

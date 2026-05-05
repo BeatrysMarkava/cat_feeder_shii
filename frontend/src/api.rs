@@ -1,5 +1,6 @@
 use common::{
-    CreateScheduleRequest, FeedNowRequest, FeederCommand, FeedingSchedule, UpdateScheduleRequest,
+    ClientActionRequest, CreateScheduleRequest, FeedNowRequest, FeederCommand, FeedingSchedule,
+    UpdateScheduleRequest,
 };
 use gloo_net::http::Request;
 
@@ -113,4 +114,23 @@ pub async fn fetch_command(command_id: i64) -> Result<FeederCommand, String> {
         .json::<FeederCommand>()
         .await
         .map_err(|err| err.to_string())
+}
+
+pub async fn track_client_action(action: &str, detail: Option<String>) -> Result<(), String> {
+    let payload = ClientActionRequest {
+        action: String::from(action),
+        detail,
+    };
+    let response = Request::post(&format!("{API_BASE}/client-actions"))
+        .json(&payload)
+        .map_err(|err| err.to_string())?
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+
+    if !response.ok() {
+        return Err(read_error(response).await);
+    }
+
+    Ok(())
 }
