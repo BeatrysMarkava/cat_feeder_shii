@@ -1,25 +1,8 @@
 use leptos::{ev, prelude::*};
-use wasm_bindgen::{JsCast, JsValue, closure::Closure};
-use wasm_bindgen_futures::{JsFuture, spawn_local};
+use wasm_bindgen_futures::spawn_local;
 
-use crate::app::{AppState, EventTone};
-
-async fn sleep_ms(milliseconds: i32) {
-    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-        let callback = Closure::once_into_js(move || {
-            let _ = resolve.call0(&JsValue::NULL);
-        });
-
-        if let Some(window) = web_sys::window() {
-            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
-                callback.unchecked_ref(),
-                milliseconds,
-            );
-        }
-    });
-
-    let _ = JsFuture::from(promise).await;
-}
+use crate::app::AppState;
+use crate::tauri_api::{self, BleDevice, WifiNetwork};
 
 #[component]
 pub fn FeederListPage<F1, F2>(
@@ -60,6 +43,10 @@ where
                             <button
                                 class="setup-card"
                                 on:click=move |_| {
+                                    tauri_api::report_button_click(
+                                        "feeder_card_clicked",
+                                        Some(format!("id={feeder_id}")),
+                                    );
                                     set_app_state.update(|state| state.select_feeder(feeder_id));
                                     on_open();
                                 }
@@ -79,7 +66,13 @@ where
                 />
             </div>
 
-            <button class="feed-now-button setup-main-action" on:click=move |_| on_add()>
+            <button
+                class="feed-now-button setup-main-action"
+                on:click=move |_| {
+                    tauri_api::report_button_click("add_new_feeder_clicked", None);
+                    on_add();
+                }
+            >
                 "Add new feeder"
             </button>
         </section>
@@ -108,17 +101,29 @@ where
                 </div>
 
                 <div class="setup-list">
-                    <button class="setup-card" on:click=move |_| on_bluetooth()>
+                    <button
+                        class="setup-card"
+                        on:click=move |_| {
+                            tauri_api::report_button_click("add_feeder_bluetooth_clicked", None);
+                            on_bluetooth();
+                        }
+                    >
                         <div>
                             <p class="setup-card-title">"Bluetooth"</p>
                             <p class="setup-card-copy">"Scan nearby devices and configure the feeder."</p>
                         </div>
                         <span class="settings-arrow">">"</span>
                     </button>
-                    <button class="setup-card" on:click=move |_| on_wifi()>
+                    <button
+                        class="setup-card"
+                        on:click=move |_| {
+                            tauri_api::report_button_click("add_feeder_wifi_clicked", None);
+                            on_wifi();
+                        }
+                    >
                         <div>
                             <p class="setup-card-title">"Wi-Fi"</p>
-                            <p class="setup-card-copy">"Connect directly with server address and auth token."</p>
+                            <p class="setup-card-copy">"Finish setup using your feeder connection details."</p>
                         </div>
                         <span class="settings-arrow">">"</span>
                     </button>
@@ -136,19 +141,25 @@ where
 {
     let (is_scanning, set_is_scanning) = signal(true);
     let (selected_device, set_selected_device) = signal(String::new());
+    let (selected_device_id, set_selected_device_id) = signal(String::new());
+    let (is_connected, set_is_connected) = signal(false);
+    let (devices, set_devices) = signal(Vec::<BleDevice>::new());
+    let (scan_status, set_scan_status) = signal(String::new());
 
     spawn_local(async move {
-        sleep_ms(1_200).await;
+        let _ = tauri_api::frontend_action("bluetooth_scan_opened", None).await;
+        match tauri_api::scan_ble_devices().await {
+            Ok(found_devices) => {
+                set_scan_status.set(format!("Found {} device(s).", found_devices.len()));
+                set_devices.set(found_devices);
+            }
+            Err(error) => {
+                set_scan_status.set(format!("Bluetooth scan unavailable: {error}"));
+                set_devices.set(Vec::new());
+            }
+        }
         set_is_scanning.set(false);
     });
-
-    let devices = || {
-        vec![
-            ("Barsik Feeder BLE", "-42 dBm"),
-            ("Kitchen Feeder C6", "-61 dBm"),
-            ("Unknown Feeder", "-77 dBm"),
-        ]
-    };
 
     view! {
         <section class="page">
@@ -166,33 +177,76 @@ where
                     when=move || !is_scanning.get()
                     fallback=move || view! { <SetupLoader label="Scanning Bluetooth devices..." /> }
                 >
+                    <Show when=move || !scan_status.get().is_empty()>
+                        <p class="inline-status">{move || scan_status.get()}</p>
+                    </Show>
+
                     <div class="setup-list">
                         <For
-                            each=devices
-                            key=|device| device.0
+                            each=move || devices.get()
+                            key=|device| device.id.clone()
                             children=move |device| {
+                                let device_id = device.id.clone();
+                                let device_name = device.name.clone();
+                                let signal_strength = device.signal_strength;
                                 view! {
                                     <button
                                         class="setup-card"
                                         on:click=move |_| {
-                                            set_selected_device.set(String::from(device.0));
-                                            web_sys::console::log_1(&format!("selected bluetooth device: {}", device.0).into());
+                                            set_selected_device.set(device_name.clone());
+                                            set_selected_device_id.set(device_id.clone());
+                                            set_is_connected.set(false);
+                                            set_scan_status.set(format!("Connecting to {}...", device_name));
+                                            spawn_local({
+                                                let device_id = device_id.clone();
+                                                let device_name = device_name.clone();
+                                                async move {
+                                                    let _ = tauri_api::frontend_action(
+                                                        "bluetooth_device_clicked",
+                                                        Some(format!("id={}, name={}", device_id, device_name)),
+                                                    )
+                                                    .await;
+
+                                                    match tauri_api::connect_esp32c6(&device_id).await {
+                                                        Ok(()) => {
+                                                            set_is_connected.set(true);
+                                                            set_scan_status.set(format!("Connected to {}.", device_name));
+                                                        }
+                                                        Err(error) => {
+                                                            set_is_connected.set(false);
+                                                            set_scan_status.set(format!("Connection failed: {error}"));
+                                                        }
+                                                    }
+                                                }
+                                            });
                                         }
                                     >
                                         <div>
-                                            <p class="setup-card-title">{device.0}</p>
-                                            <p class="setup-card-copy">{device.1}</p>
+                                            <p class="setup-card-title">{device.name}</p>
+                                            <p class="setup-card-copy">{format!("{} dBm", signal_strength)}</p>
                                         </div>
-                                        <span class="pill-badge active">"BLE"</span>
+                                        <span class="pill-badge active">"Bluetooth"</span>
                                     </button>
                                 }
                             }
                         />
                     </div>
 
-                    <Show when=move || !selected_device.get().is_empty()>
+                    <Show when=move || !selected_device.get().is_empty() && is_connected.get()>
                         <p class="inline-status">{move || format!("Selected: {}", selected_device.get())}</p>
-                        <button class="feed-now-button setup-main-action" on:click=move |_| on_continue()>
+                        <button
+                            class="feed-now-button setup-main-action"
+                            on:click=move |_| {
+                                spawn_local(async move {
+                                    let _ = tauri_api::frontend_action(
+                                        "bluetooth_continue_clicked",
+                                        Some(format!("device_id={}", selected_device_id.get())),
+                                    )
+                                    .await;
+                                });
+                                on_continue();
+                            }
+                        >
                             "Continue"
                         </button>
                     </Show>
@@ -213,16 +267,28 @@ where
         <section class="page">
             <SetupTopBar title="Network setup" on_back=on_back />
             <div class="panel panel-tight">
-                <p class="panel-title">"Configure Wi-Fi and server?"</p>
+                <p class="panel-title">"Configure network access?"</p>
                 <p class="panel-subtitle">
-                    "The feeder can receive Wi-Fi credentials and backend settings after Bluetooth pairing."
+                    "Send network details to the feeder after Bluetooth pairing."
                 </p>
                 <div class="success-actions">
-                    <button class="cta-button cta-primary" on:click=move |_| on_yes()>
+                    <button
+                        class="cta-button cta-primary"
+                        on:click=move |_| {
+                            tauri_api::report_button_click("wifi_setup_question_configure_clicked", None);
+                            on_yes();
+                        }
+                    >
                         <span class="cta-title">"Configure"</span>
-                        <span class="cta-copy">"Scan networks and set backend access."</span>
+                        <span class="cta-copy">"Scan networks and connect the feeder."</span>
                     </button>
-                    <button class="cta-button cta-secondary" on:click=move |_| on_skip()>
+                    <button
+                        class="cta-button cta-secondary"
+                        on:click=move |_| {
+                            tauri_api::report_button_click("wifi_setup_question_skip_clicked", None);
+                            on_skip();
+                        }
+                    >
                         <span class="cta-title">"Skip"</span>
                         <span class="cta-copy">"Open feeder controls now."</span>
                     </button>
@@ -233,32 +299,33 @@ where
 }
 
 #[component]
-pub fn WifiSetupPage<F1, F2>(
-    set_app_state: WriteSignal<AppState>,
-    on_back: F1,
-    on_connected: F2,
-) -> impl IntoView
+pub fn WifiSetupPage<F1, F2>(on_back: F1, on_connected: F2) -> impl IntoView
 where
     F1: Fn() + Copy + Send + Sync + 'static,
     F2: Fn() + Copy + Send + Sync + 'static,
 {
     let (is_scanning, set_is_scanning) = signal(true);
     let (selected_network, set_selected_network) = signal(String::new());
+    let (selected_network_index, set_selected_network_index) = signal(0usize);
     let (connection_type, set_connection_type) = signal(String::from("DHCP"));
     let (password, set_password) = signal(String::new());
+    let (networks, set_networks) = signal(Vec::<WifiNetwork>::new());
+    let (scan_status, set_scan_status) = signal(String::new());
 
     spawn_local(async move {
-        sleep_ms(1_200).await;
+        let _ = tauri_api::frontend_action("wifi_scan_opened", None).await;
+        match tauri_api::scan_wifi_networks().await {
+            Ok(found_networks) => {
+                set_scan_status.set(format!("Found {} network(s).", found_networks.len()));
+                set_networks.set(found_networks);
+            }
+            Err(error) => {
+                set_scan_status.set(format!("Wi-Fi scan unavailable: {error}"));
+                set_networks.set(Vec::new());
+            }
+        }
         set_is_scanning.set(false);
     });
-
-    let networks = || {
-        vec![
-            ("Home Wi-Fi", "-38 dBm", true),
-            ("FIIT Lab", "-56 dBm", true),
-            ("Open Setup Net", "-71 dBm", false),
-        ]
-    };
 
     view! {
         <section class="page">
@@ -269,22 +336,43 @@ where
                     when=move || !is_scanning.get()
                     fallback=move || view! { <SetupLoader label="Scanning Wi-Fi networks..." /> }
                 >
+                    <Show when=move || !scan_status.get().is_empty()>
+                        <p class="inline-status">{move || scan_status.get()}</p>
+                    </Show>
+
                     <div class="setup-list">
                         <For
-                            each=networks
-                            key=|network| network.0
+                            each=move || networks.get()
+                            key=|network| network.ssid.clone()
                             children=move |network| {
+                                let ssid = network.ssid.clone();
+                                let network_index = network.network_index;
+                                let signal_strength = network.signal_strength;
+                                let locked = network.locked;
                                 view! {
                                     <button
                                         class="setup-card"
-                                        on:click=move |_| set_selected_network.set(String::from(network.0))
+                                        on:click=move |_| {
+                                            set_selected_network.set(ssid.clone());
+                                            set_selected_network_index.set(network_index);
+                                            spawn_local({
+                                                let ssid = ssid.clone();
+                                                async move {
+                                                    let _ = tauri_api::frontend_action(
+                                                        "wifi_network_clicked",
+                                                        Some(format!("ssid={ssid}")),
+                                                    )
+                                                    .await;
+                                                }
+                                            });
+                                        }
                                     >
                                         <div>
-                                            <p class="setup-card-title">{network.0}</p>
-                                            <p class="setup-card-copy">{network.1}</p>
+                                            <p class="setup-card-title">{network.ssid}</p>
+                                            <p class="setup-card-copy">{format!("{} dBm", signal_strength)}</p>
                                         </div>
-                                        <span class=if network.2 { "pill-badge inactive" } else { "pill-badge active" }>
-                                            {if network.2 { "Locked" } else { "Open" }}
+                                        <span class=if locked { "pill-badge inactive" } else { "pill-badge active" }>
+                                            {if locked { "Locked" } else { "Open" }}
                                         </span>
                                     </button>
                                 }
@@ -308,9 +396,7 @@ where
                                 }
                             >
                                 <option value="DHCP">"DHCP"</option>
-                                <option value="Static IPv4">"Static IPv4"</option>
                                 <option value="DHCPv6">"DHCPv6"</option>
-                                <option value="Static IPv6">"Static IPv6"</option>
                             </select>
                         </label>
                         <label class="settings-field">
@@ -325,20 +411,65 @@ where
                         <button
                             class="feed-now-button"
                             on:click=move |_| {
-                                set_app_state.update(|state| {
-                                    state.push_event(
-                                        String::from("Wi-Fi configured"),
-                                        format!("{} using {}", selected_network.get(), connection_type.get()),
-                                        String::from("Now"),
-                                        EventTone::Success,
-                                    );
+                                set_scan_status.set(format!(
+                                    "Sending credentials for {}...",
+                                    selected_network.get()
+                                ));
+                                spawn_local(async move {
+                                    let _ = tauri_api::frontend_action(
+                                        "wifi_connect_clicked",
+                                        Some(format!(
+                                            "ssid={}, network_index={}, connection_type={}",
+                                            selected_network.get(),
+                                            selected_network_index.get(),
+                                            connection_type.get()
+                                        )),
+                                    )
+                                    .await;
+
+                                    match tauri_api::send_wifi_credentials(
+                                        &selected_network.get(),
+                                        selected_network_index.get(),
+                                        &password.get(),
+                                        &connection_type.get(),
+                                    )
+                                    .await
+                                    {
+                                        Ok(message) => {
+                                            set_scan_status.set(message.clone());
+                                            let _ = tauri_api::frontend_action(
+                                                "wifi_credentials_sent",
+                                                Some(message),
+                                            )
+                                            .await;
+                                            on_connected();
+                                        }
+                                        Err(error) => {
+                                            set_scan_status.set(format!(
+                                                "Wi-Fi provisioning failed: {error}"
+                                            ));
+                                            let _ = tauri_api::frontend_action(
+                                                "wifi_credentials_error",
+                                                Some(error.clone()),
+                                            )
+                                            .await;
+                                            web_sys::console::error_1(
+                                                &format!("Wi-Fi provisioning failed: {error}").into(),
+                                            );
+                                        }
+                                    }
                                 });
-                                on_connected();
                             }
                         >
                             "Connect"
                         </button>
-                        <button class="text-button setup-cancel" on:click=move |_| set_selected_network.set(String::new())>
+                        <button
+                            class="text-button setup-cancel"
+                            on:click=move |_| {
+                                tauri_api::report_button_click("wifi_modal_cancel_clicked", None);
+                                set_selected_network.set(String::new());
+                            }
+                        >
                             "Cancel"
                         </button>
                     </div>
@@ -349,7 +480,7 @@ where
 }
 
 #[component]
-pub fn ServerSetupPage<F1, F2>(
+pub fn ConnectionDetailsPage<F1, F2>(
     set_app_state: WriteSignal<AppState>,
     on_back: F1,
     on_done: F2,
@@ -358,30 +489,30 @@ where
     F1: Fn() + Copy + Send + Sync + 'static,
     F2: Fn() + Copy + Send + Sync + 'static,
 {
-    let (server_url, set_server_url) = signal(String::from("http://127.0.0.1:8081"));
+    let (connection_address, set_connection_address) = signal(String::from("http://127.0.0.1:8081"));
     let (token, set_token) = signal(String::new());
 
     view! {
         <section class="page">
-            <SetupTopBar title="Server access" on_back=on_back />
+            <SetupTopBar title="Connection details" on_back=on_back />
 
             <div class="panel panel-tight">
-                <p class="panel-title">"Backend connection"</p>
+                <p class="panel-title">"Feeder connection"</p>
                 <p class="panel-subtitle">
-                    "Enter server URL and authentication token. This screen is ready for the future real request."
+                    "Enter the address and access key for this feeder."
                 </p>
 
                 <label class="settings-field">
-                    <span class="settings-label">"Server URL"</span>
+                    <span class="settings-label">"Address"</span>
                     <input
                         class="settings-input"
-                        prop:value=move || server_url.get()
-                        on:input=move |event| set_server_url.set(event_target_value(&event))
+                        prop:value=move || connection_address.get()
+                        on:input=move |event| set_connection_address.set(event_target_value(&event))
                     />
                 </label>
 
                 <label class="settings-field">
-                    <span class="settings-label">"Auth token"</span>
+                    <span class="settings-label">"Access key"</span>
                     <input
                         class="settings-input"
                         type="password"
@@ -393,6 +524,10 @@ where
                 <button
                     class="feed-now-button setup-main-action"
                     on:click=move |_| {
+                        tauri_api::report_button_click(
+                            "connection_details_connect_clicked",
+                            Some(format!("address={}", connection_address.get())),
+                        );
                         let feeder_id = set_app_state
                             .try_update(|state| {
                                 let id = state.add_demo_feeder(
@@ -400,12 +535,6 @@ where
                                     String::from("Wi-Fi"),
                                 );
                                 state.select_feeder(id);
-                                state.push_event(
-                                    String::from("Server connected"),
-                                    server_url.get(),
-                                    String::from("Now"),
-                                    EventTone::Success,
-                                );
                                 id
                             })
                             .unwrap_or(1);
@@ -428,7 +557,13 @@ where
 {
     view! {
         <div class="top-bar">
-            <button class="back-button" on:click=move |_| on_back()>
+            <button
+                class="back-button"
+                on:click=move |_| {
+                    tauri_api::report_button_click("setup_back_clicked", Some(String::from(title)));
+                    on_back();
+                }
+            >
                 "<"
             </button>
             <div class="app-title">{title}</div>

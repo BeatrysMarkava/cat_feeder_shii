@@ -5,7 +5,8 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{FileReader, HtmlInputElement};
 
-use crate::app::{AppState, EventTone};
+use crate::app::AppState;
+use crate::tauri_api;
 
 #[component]
 pub fn SettingsPage<F>(
@@ -19,6 +20,7 @@ where
     let input_ref = NodeRef::<html::Input>::new();
 
     let open_picker = move |_| {
+        tauri_api::report_button_click("settings_change_photo_clicked", None);
         if let Some(input) = input_ref.get() {
             input.click();
         }
@@ -55,12 +57,6 @@ where
             if let Some(image_url) = result.as_string() {
                 set_app_state.update(|state| {
                     state.cat_photo = image_url;
-                    state.push_event(
-                        String::from("Profile photo updated"),
-                        String::from("Home screen avatar was refreshed"),
-                        String::from("Just now"),
-                        EventTone::Info,
-                    );
                 });
             }
         }) as Box<dyn FnMut()>);
@@ -78,47 +74,26 @@ where
     };
 
     let toggle_notifications = move |_| {
+        tauri_api::report_button_click("settings_notifications_clicked", None);
         set_app_state.update(|state| {
             state.notifications_enabled = !state.notifications_enabled;
-            let detail = if state.notifications_enabled {
-                String::from("Push alerts for feed events are enabled")
-            } else {
-                String::from("Push alerts were muted on this device")
-            };
-            state.push_event(
-                String::from("Notification preference changed"),
-                detail,
-                String::from("Just now"),
-                EventTone::Info,
-            );
         });
     };
 
     let toggle_connection = move |_| {
+        tauri_api::report_button_click("settings_connection_clicked", None);
         set_app_state.update(|state| {
             state.feeder_connected = !state.feeder_connected;
-            let (title, detail, tone) = if state.feeder_connected {
-                (
-                    String::from("Feeder is online"),
-                    String::from("The controller reconnected successfully"),
-                    EventTone::Success,
-                )
-            } else {
-                (
-                    String::from("Feeder connection lost"),
-                    String::from("The app switched to offline demo mode"),
-                    EventTone::Warning,
-                )
-            };
-            state.push_event(title, detail, String::from("Just now"), tone);
         });
     };
 
     let refill_hopper = move |_| {
+        tauri_api::report_button_click("settings_refill_hopper_clicked", None);
         set_app_state.update(|state| state.refill_hopper());
     };
 
     let return_to_feeders = move |_| {
+        tauri_api::report_button_click("settings_switch_feeder_clicked", None);
         set_app_state.update(|state| state.clear_selected_feeder());
         on_feeder_list();
     };

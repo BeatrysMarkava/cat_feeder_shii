@@ -1,8 +1,6 @@
 use std::str::FromStr;
-use std::time::Duration as StdDuration;
 
 use actix_cors::Cors;
-use actix_web::rt;
 use actix_web::{
     App, HttpResponse, HttpServer, Responder, Result, delete, get, patch, post,
     web::{Data, Json, Path, Query},
@@ -31,10 +29,8 @@ const TIMESTAMP_FORMAT: &[time::format_description::FormatItem<'static>] =
 const DEFAULT_DEVICE_KEY: &str = "barsik-esp32c6";
 const DEFAULT_DEVICE_NAME: &str = "Barsik ESP32-C6";
 const DEFAULT_TIMEZONE: &str = "Europe/Bratislava";
-const COMMAND_CLAIM_TIMEOUT_SECONDS: i64 = 30;
+const COMMAND_CLAIM_TIMEOUT_SECONDS: i64 = 5;
 const COMMAND_MAX_ATTEMPTS: i32 = 3;
-const MOCK_ESP_COMPLETION_SECONDS: u64 = 2;
-const DEBUG_MODE: bool = true;
 
 #[derive(Clone)]
 struct AppState {
@@ -125,23 +121,10 @@ impl TryFrom<DeviceRow> for DeviceStatusResponse {
                 actix_web::error::ErrorInternalServerError("stored hopper level is out of range")
             })?;
 
-        let online = if debug_mode_enabled() {
-            true
-        } else {
-            value.last_seen_at.is_some()
-        };
-
-        if debug_mode_enabled() {
-            log_debug("device_status", format!(
-                "Device {} - online={} (forced by DEBUG mode), hopper_level={:?}",
-                value.device_key, online, hopper_level
-            ));
-        }
-
         Ok(Self {
             device_key: value.device_key,
             name: value.name,
-            online,
+            online: value.last_seen_at.is_some(),
             hopper_level,
             firmware_version: value.firmware_version,
             ip_address: value.ip_address,
@@ -334,42 +317,31 @@ fn validate_portion(value: u8) -> Result<u8> {
 }
 
 fn log_api(action: &str, detail: impl AsRef<str>) {
-    let timestamp = OffsetDateTime::now_utc().format(TIMESTAMP_FORMAT).unwrap_or_else(|_| String::from("??:??:??"));
+    let timestamp = OffsetDateTime::now_utc()
+        .format(TIMESTAMP_FORMAT)
+        .unwrap_or_else(|_| String::from("??:??:??"));
     println!("[{timestamp}] [api] {action}: {}", detail.as_ref());
 }
 
-fn log_debug(section: &str, message: impl AsRef<str>) {
-    if debug_mode_enabled() {
-        let timestamp = OffsetDateTime::now_utc().format(TIMESTAMP_FORMAT).unwrap_or_else(|_| String::from("??:??:??"));
-        println!("[{timestamp}] [DEBUG] [{section}] {}", message.as_ref());
-    }
-}
-
 fn log_info(section: &str, message: impl AsRef<str>) {
-    let timestamp = OffsetDateTime::now_utc().format(TIMESTAMP_FORMAT).unwrap_or_else(|_| String::from("??:??:??"));
+    let timestamp = OffsetDateTime::now_utc()
+        .format(TIMESTAMP_FORMAT)
+        .unwrap_or_else(|_| String::from("??:??:??"));
     println!("[{timestamp}] [INFO] [{section}] {}", message.as_ref());
 }
 
 fn log_warn(section: &str, message: impl AsRef<str>) {
-    let timestamp = OffsetDateTime::now_utc().format(TIMESTAMP_FORMAT).unwrap_or_else(|_| String::from("??:??:??"));
+    let timestamp = OffsetDateTime::now_utc()
+        .format(TIMESTAMP_FORMAT)
+        .unwrap_or_else(|_| String::from("??:??:??"));
     println!("[{timestamp}] [WARN] [{section}] {}", message.as_ref());
 }
 
 fn log_error(section: &str, message: impl AsRef<str>) {
-    let timestamp = OffsetDateTime::now_utc().format(TIMESTAMP_FORMAT).unwrap_or_else(|_| String::from("??:??:??"));
+    let timestamp = OffsetDateTime::now_utc()
+        .format(TIMESTAMP_FORMAT)
+        .unwrap_or_else(|_| String::from("??:??:??"));
     println!("[{timestamp}] [ERROR] [{section}] {}", message.as_ref());
-}
-
-fn debug_mode_enabled() -> bool {
-    std::env::var("BARSIK_DEBUG")
-        .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
-        .unwrap_or(DEBUG_MODE)
-}
-
-fn mock_esp_enabled() -> bool {
-    std::env::var("BARSIK_MOCK_ESP")
-        .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
-        .unwrap_or(true)
 }
 
 async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
@@ -502,9 +474,6 @@ async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
 #[get("/api/health")]
 async fn health() -> impl Responder {
     log_info("health", "Health check passed");
-    if debug_mode_enabled() {
-        log_debug("health", "Debug mode is ENABLED");
-    }
     Json(HealthResponse { status: "ok" })
 }
 
@@ -561,6 +530,24 @@ async fn default_device_key(state: &Data<AppState>) -> Result<String> {
 async fn release_stale_commands(state: &Data<AppState>) -> Result<()> {
     let now = now_rfc3339()?;
 
+    let expired_pending = sqlx::query(
+        r#"
+        UPDATE feeder_commands
+        SET status = 'failed',
+            retry_count = max_attempts,
+            message = 'device did not claim command after all attempts',
+            completed_at = $3
+        WHERE status = 'pending'
+            AND created_at::timestamptz < now() - (($1::bigint * $2::bigint) * interval '1 second')
+        "#,
+    )
+    .bind(COMMAND_CLAIM_TIMEOUT_SECONDS)
+    .bind(COMMAND_MAX_ATTEMPTS)
+    .bind(&now)
+    .execute(&state.db)
+    .await
+    .map_err(|err| actix_web::error::ErrorInternalServerError(err.to_string()))?;
+
     let failed = sqlx::query(
         r#"
         UPDATE feeder_commands
@@ -598,11 +585,15 @@ async fn release_stale_commands(state: &Data<AppState>) -> Result<()> {
     .await
     .map_err(|err| actix_web::error::ErrorInternalServerError(err.to_string()))?;
 
-    if failed.rows_affected() > 0 || retried.rows_affected() > 0 {
+    if expired_pending.rows_affected() > 0
+        || failed.rows_affected() > 0
+        || retried.rows_affected() > 0
+    {
         log_api(
             "stale command sweep",
             format!(
-                "retried={}, failed={}",
+                "expired_pending={}, retried={}, failed={}",
+                expired_pending.rows_affected(),
                 retried.rows_affected(),
                 failed.rows_affected()
             ),
@@ -610,81 +601,6 @@ async fn release_stale_commands(state: &Data<AppState>) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn spawn_mock_esp_completion(pool: PgPool, command: FeederCommand, device_key: String) {
-    if !mock_esp_enabled() {
-        log_warn(
-            "mock_esp",
-            "disabled; waiting for real ESP32-C6 command completion",
-        );
-        return;
-    }
-
-    rt::spawn(async move {
-        log_info(
-            "mock_esp",
-            format!(
-                "Simulating ESP32 command completion: id={}, portion={}, delay={}s",
-                command.id, command.portion, MOCK_ESP_COMPLETION_SECONDS
-            ),
-        );
-        log_debug(
-            "mock_esp",
-            format!("Device: {}, Command type: {}", device_key, command.command_type),
-        );
-        rt::time::sleep(StdDuration::from_secs(MOCK_ESP_COMPLETION_SECONDS)).await;
-
-        let completed_at = OffsetDateTime::now_utc()
-            .format(&Rfc3339)
-            .unwrap_or_else(|_| String::from("now"));
-
-        match sqlx::query(
-            r#"
-            UPDATE feeder_commands
-            SET status = 'completed',
-                message = 'completed by mock ESP mode',
-                claimed_at = COALESCE(claimed_at, $2),
-                completed_at = $2
-            WHERE id = $1 AND status IN ('pending', 'claimed')
-            "#,
-        )
-        .bind(command.id)
-        .bind(&completed_at)
-        .execute(&pool)
-        .await
-        {
-            Ok(result) if result.rows_affected() > 0 => {
-                let _ = sqlx::query(
-                    r#"
-                    INSERT INTO feeding_history (device_key, portion, source, fed_at, created_at)
-                    VALUES ($1, $2, 'mock_esp', $3, $3)
-                    "#,
-                )
-                .bind(&device_key)
-                .bind(i32::from(command.portion))
-                .bind(&completed_at)
-                .execute(&pool)
-                .await;
-                log_info(
-                    "mock_esp",
-                    format!("Command {} completed successfully - {} portions fed!", command.id, command.portion),
-                );
-            }
-            Ok(_) => {
-                log_warn(
-                    "mock_esp",
-                    format!("command id={} was already finished", command.id),
-                );
-            }
-            Err(error) => {
-                log_error(
-                    "mock esp error",
-                    format!("command id={} failed to update: {error}", command.id),
-                );
-            }
-        }
-    });
 }
 
 async fn get_device_status_by_key(
@@ -719,13 +635,6 @@ async fn device_status(state: Data<AppState>) -> Result<Json<DeviceStatusRespons
             status.device_key, status.online, status.hopper_level
         ),
     );
-    if debug_mode_enabled() {
-        log_debug("device_status", format!(
-            "Complete status: device_key={}, name={}, online={}, hopper_level={:?}, ip={:?}, fw={:?}",
-            status.device_key, status.device_key, status.online, status.hopper_level, 
-            status.ip_address, status.firmware_version
-        ));
-    }
     Ok(Json(status))
 }
 
@@ -749,7 +658,13 @@ async fn register_device(
         ),
     );
 
-    log_info("device_register", format!("Device registration started: device_key={}, name={}", device_key, name));
+    log_info(
+        "device_register",
+        format!(
+            "Device registration started: device_key={}, name={}",
+            device_key, name
+        ),
+    );
 
     sqlx::query(
         r#"
@@ -773,7 +688,10 @@ async fn register_device(
     .map_err(|err| actix_web::error::ErrorInternalServerError(err.to_string()))?;
 
     let status = get_device_status_by_key(&state, &device_key).await?;
-    log_info("device_register", format!("Device registered successfully: online={}", status.online));
+    log_info(
+        "device_register",
+        format!("Device registered successfully: online={}", status.online),
+    );
     log_api(
         "device register response",
         format!("device_key={}", status.device_key),
@@ -794,7 +712,14 @@ async fn device_heartbeat(
             device_key, payload.hopper_level, payload.ip_address, payload.firmware_version
         ),
     );
-    log_info("device_heartbeat", format!("Heartbeat from device: {}, hopper={}%", device_key, payload.hopper_level.unwrap_or(0)));
+    log_info(
+        "device_heartbeat",
+        format!(
+            "Heartbeat from device: {}, hopper={}%",
+            device_key,
+            payload.hopper_level.unwrap_or(0)
+        ),
+    );
     if let Some(level) = payload.hopper_level {
         if level > 100 {
             return Err(actix_web::error::ErrorBadRequest(
@@ -829,7 +754,10 @@ async fn device_heartbeat(
     .map_err(|err| actix_web::error::ErrorInternalServerError(err.to_string()))?;
 
     let status = get_device_status_by_key(&state, &device_key).await?;
-    log_info("device_heartbeat", format!("Heartbeat processed: online={}", status.online));
+    log_info(
+        "device_heartbeat",
+        format!("Heartbeat processed: online={}", status.online),
+    );
     log_api(
         "device heartbeat response",
         format!(
@@ -924,7 +852,10 @@ async fn create_schedule(
         Some(date) => match weekday_from_date(date) {
             Ok(d) => d,
             Err(e) => {
-                log_error("create_schedule", format!("Failed to get weekday from date: {}", e));
+                log_error(
+                    "create_schedule",
+                    format!("Failed to get weekday from date: {}", e),
+                );
                 return Err(e);
             }
         },
@@ -953,12 +884,13 @@ async fn create_schedule(
         ),
     );
 
-    let created_at = match OffsetDateTime::now_utc()
-        .format(&Rfc3339) {
+    let created_at = match OffsetDateTime::now_utc().format(&Rfc3339) {
         Ok(ts) => ts,
         Err(_) => {
             log_error("create_schedule", "Failed to format created_at timestamp");
-            return Err(actix_web::error::ErrorInternalServerError("failed to format created_at"));
+            return Err(actix_web::error::ErrorInternalServerError(
+                "failed to format created_at",
+            ));
         }
     };
 
@@ -989,7 +921,10 @@ async fn create_schedule(
     let next_run_at = match next_run_at(feeding_date.as_deref(), &feeding_day, &feeding_time) {
         Ok(nra) => nra,
         Err(e) => {
-            log_error("create_schedule", format!("Failed to calculate next_run_at: {}", e));
+            log_error(
+                "create_schedule",
+                format!("Failed to calculate next_run_at: {}", e),
+            );
             return Err(e);
         }
     };
@@ -1009,7 +944,10 @@ async fn create_schedule(
         "create schedule response",
         format!("id={}, next_run_at={}", schedule.id, schedule.next_run_at),
     );
-    log_info("create_schedule", format!("Schedule created successfully: id={}", schedule.id));
+    log_info(
+        "create_schedule",
+        format!("Schedule created successfully: id={}", schedule.id),
+    );
     Ok(HttpResponse::Created().json(schedule))
 }
 
@@ -1040,7 +978,13 @@ async fn create_feed_now_command(
             return Err(e);
         }
     };
-    log_info("feed_command", format!("Feed command requested: device={}, portions={}", device_key, portion));
+    log_info(
+        "feed_command",
+        format!(
+            "Feed command requested: device={}, portions={}",
+            device_key, portion
+        ),
+    );
     log_api(
         "feed-now command received",
         format!("device_key={}, portion={}", device_key, portion),
@@ -1071,11 +1015,17 @@ async fn create_feed_now_command(
     let command = match FeederCommand::try_from(row) {
         Ok(c) => c,
         Err(e) => {
-            log_error("feed_command", format!("Failed to convert row to command: {}", e));
+            log_error(
+                "feed_command",
+                format!("Failed to convert row to command: {}", e),
+            );
             return Err(e);
         }
     };
-    log_info("feed_command", format!("Command created: id={}, status=pending", command.id));
+    log_info(
+        "feed_command",
+        format!("Command created: id={}, status=pending", command.id),
+    );
     log_api(
         "feed-now command response",
         format!(
@@ -1083,7 +1033,6 @@ async fn create_feed_now_command(
             command.id, command.status, command.retry_count, command.max_attempts
         ),
     );
-    spawn_mock_esp_completion(state.db.clone(), command.clone(), device_key);
     let response = HttpResponse::Accepted().json(command);
     log_info("feed_command", "Sending response to client");
     Ok(response)
@@ -1096,7 +1045,10 @@ async fn next_device_command(
 ) -> Result<Json<Option<FeederCommand>>> {
     let device_key = validate_device_key(&query.device_key)?;
     let now = now_rfc3339()?;
-    log_info("device_commands", format!("Device polling for next command: {}", device_key));
+    log_info(
+        "device_commands",
+        format!("Device polling for next command: {}", device_key),
+    );
     log_api(
         "device next-command received",
         format!("device_key={device_key}"),
@@ -1126,7 +1078,13 @@ async fn next_device_command(
     let command = row.map(FeederCommand::try_from).transpose()?;
     match &command {
         Some(command) => {
-            log_info("device_commands", format!("Sending command to device: id={}, type={}, portions={}", command.id, command.command_type, command.portion));
+            log_info(
+                "device_commands",
+                format!(
+                    "Sending command to device: id={}, type={}, portions={}",
+                    command.id, command.command_type, command.portion
+                ),
+            );
             log_api(
                 "device next-command response",
                 format!(
@@ -1134,11 +1092,14 @@ async fn next_device_command(
                     command.id, command.status, command.retry_count, command.max_attempts
                 ),
             )
-        },
+        }
         None => {
-            log_debug("device_commands", format!("No pending commands for device: {}", device_key));
+            log_info(
+                "device_commands",
+                format!("No pending commands for device: {}", device_key),
+            );
             log_api("device next-command response", "no pending commands")
-        },
+        }
     }
     Ok(Json(command))
 }
@@ -1159,7 +1120,13 @@ async fn complete_device_command(
         }
     };
     let now = now_rfc3339()?;
-    log_info("device_commands", format!("Command completion: id={}, device={}, status={}", *command_id, device_key, status));
+    log_info(
+        "device_commands",
+        format!(
+            "Command completion: id={}, device={}, status={}",
+            *command_id, device_key, status
+        ),
+    );
     log_api(
         "device command completion received",
         format!(
@@ -1188,9 +1155,21 @@ async fn complete_device_command(
 
     let command = FeederCommand::try_from(row)?;
     if status == "completed" {
-        log_info("device_commands", format!("Command completed successfully: id={}, portions fed", command.id));
+        log_info(
+            "device_commands",
+            format!(
+                "Command completed successfully: id={}, portions fed",
+                command.id
+            ),
+        );
     } else {
-        log_warn("device_commands", format!("Command failed: id={}, message={:?}", command.id, command.message));
+        log_warn(
+            "device_commands",
+            format!(
+                "Command failed: id={}, message={:?}",
+                command.id, command.message
+            ),
+        );
     }
     log_api(
         "device command completion response",
@@ -1401,29 +1380,25 @@ async fn main() -> std::io::Result<()> {
     let server_state = Data::new(AppState { db: pool });
 
     println!("\nBARSIK FEEDER SERVER - STARTING UP\n");
-    
-    log_info("startup", "Barsik backend is running at http://127.0.0.1:8081");
+
+    log_info(
+        "startup",
+        "Barsik backend is running at http://127.0.0.1:8081",
+    );
     log_info("startup", format!("Using database at {database_url}"));
-    
-    if debug_mode_enabled() {
-        log_warn("startup", "DEBUG_MODE is ENABLED - Device connection status is simulated");
-    }
-    
-    if mock_esp_enabled() {
-        log_info("startup", "MOCK_ESP is ENABLED - Commands will be auto-completed");
-    }
-    
+
     println!("Server configuration:");
     println!("   API Port: 8081");
     println!("   Database: PostgreSQL");
-    println!("   Debug Mode: {}", if debug_mode_enabled() { "ON" } else { "OFF" });
-    println!("   Mock ESP: {}", if mock_esp_enabled() { "ON" } else { "OFF" });
+    println!("   ESP Mode: REAL DEVICE");
     println!("\nLogging format: [HH:MM:SS] [LEVEL] [section] message\n");
 
     HttpServer::new(move || {
         let cors = Cors::default()
             .allowed_origin("http://127.0.0.1:8080")
             .allowed_origin("http://localhost:8080")
+            .allowed_origin("http://127.0.0.1:1420")
+            .allowed_origin("http://localhost:1420")
             .allow_any_header()
             .allow_any_method();
 

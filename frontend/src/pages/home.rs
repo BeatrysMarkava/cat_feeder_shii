@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 
 use crate::app::{AppState, format_schedule_label, portion_text};
+use crate::tauri_api;
 
 #[component]
 pub fn HomePage<F1, F2>(
@@ -92,11 +93,23 @@ where
             </div>
 
             <div class="cta-grid">
-                <button class="cta-button cta-primary" on:click=move |_| on_feed_now()>
+                <button
+                    class="cta-button cta-primary"
+                    on:click=move |_| {
+                        tauri_api::report_button_click("home_feed_now_clicked", None);
+                        on_feed_now();
+                    }
+                >
                     <span class="cta-title">"Feed Now"</span>
                 </button>
 
-                <button class="cta-button cta-secondary" on:click=move |_| on_open_schedule()>
+                <button
+                    class="cta-button cta-secondary"
+                    on:click=move |_| {
+                        tauri_api::report_button_click("home_schedule_clicked", None);
+                        on_open_schedule();
+                    }
+                >
                     <span class="cta-title">"Schedule Feeding"</span>
                 </button>
             </div>
@@ -108,9 +121,9 @@ where
                         <p class="panel-subtitle">
                             {move || {
                                 if app_state.get().schedule_loading {
-                                    String::from("Loading schedules from the server...")
+                                    String::from("Loading saved meals...")
                                 } else if let Some(error) = app_state.get().schedule_error {
-                                    format!("Backend problem: {error}")
+                                    format!("Could not sync meals: {error}")
                                 } else {
                                     format!(
                                         "{} active meals - {} total portions",
@@ -121,7 +134,13 @@ where
                             }}
                         </p>
                     </div>
-                    <button class="text-button" on:click=move |_| on_open_schedule()>
+                    <button
+                        class="text-button"
+                        on:click=move |_| {
+                            tauri_api::report_button_click("home_open_schedule_preview_clicked", None);
+                            on_open_schedule();
+                        }
+                    >
                         "Open"
                     </button>
                 </div>

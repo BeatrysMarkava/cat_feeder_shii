@@ -4,7 +4,11 @@ use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::api;
-use crate::app::{AppState, EventTone, portion_text};
+use crate::app::{AppState, portion_text};
+use crate::tauri_api;
+
+const FEED_STATUS_CHECK_ATTEMPTS: usize = 3;
+const FEED_STATUS_CHECK_INTERVAL_MS: i32 = 5_000;
 
 async fn sleep_ms(milliseconds: i32) {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
@@ -38,45 +42,50 @@ where
     let (delivery_status, set_delivery_status) = signal(String::new());
 
     let decrease = move |_| {
+        tauri_api::report_button_click("feed_portion_decrease_clicked", None);
         if portion.get() > 1 {
             set_portion.update(|value| *value -= 1);
         }
     };
 
     let increase = move |_| {
+        tauri_api::report_button_click("feed_portion_increase_clicked", None);
         if portion.get() < 5 {
             set_portion.update(|value| *value += 1);
         }
     };
 
     let dispense = move |_| {
+        tauri_api::report_button_click(
+            "feed_dispense_clicked",
+            Some(format!("portion={}", portion.get())),
+        );
         if is_sending.get() {
             return;
         }
 
         let selected = portion.get();
         set_is_sending.set(true);
-        set_delivery_status.set(String::from("Sending command to server."));
+        set_delivery_status.set(String::from("Sending feeding request."));
 
         spawn_local(async move {
-            let _ =
-                api::track_client_action("feed_now_clicked", Some(format!("portion={selected}")))
-                    .await;
+            let _ = tauri_api::frontend_action(
+                "feed_now_request_started",
+                Some(format!("portion={selected}")),
+            )
+            .await;
 
             match api::create_feed_now_command(selected).await {
                 Ok(command) => {
-                    set_app_state.update(|state| {
-                        state.push_event(
-                            String::from("Feed command sent to ESP32-C6"),
-                            format!("Command #{} queued", command.id),
-                            String::from("Just now"),
-                            EventTone::Info,
-                        );
-                    });
-                    set_delivery_status.set(format!(
-                        "Command #{} queued. Waiting until food is dispensed.",
-                        command.id
-                    ));
+                    set_delivery_status.set(String::from("Waiting for feeder confirmation."));
+                    let _ = tauri_api::frontend_action(
+                        "feed_now_command_queued",
+                        Some(format!(
+                            "command_id={}, status={}, retry={}/{}",
+                            command.id, command.status, command.retry_count, command.max_attempts
+                        )),
+                    )
+                    .await;
                     let _ = api::track_client_action(
                         "feed_now_queued",
                         Some(format!("command_id={}, portion={selected}", command.id)),
@@ -84,16 +93,25 @@ where
                     .await;
 
                     let mut finished = false;
-                    for _ in 0..40 {
-                        sleep_ms(3_000).await;
+                    for attempt in 1..=FEED_STATUS_CHECK_ATTEMPTS {
+                        sleep_ms(FEED_STATUS_CHECK_INTERVAL_MS).await;
 
                         match api::fetch_command(command.id).await {
                             Ok(updated) => match updated.status.as_str() {
                                 "completed" => {
+                                    let _ = tauri_api::frontend_action(
+                                        "feed_now_status_completed",
+                                        Some(format!(
+                                            "command_id={}, attempt={}, retry={}/{}",
+                                            updated.id,
+                                            attempt,
+                                            updated.retry_count,
+                                            updated.max_attempts
+                                        )),
+                                    )
+                                    .await;
                                     set_app_state.update(|state| state.feed_now(selected));
-                                    set_delivery_status.set(String::from(
-                                        "Food was dispensed. Returning to the menu.",
-                                    ));
+                                    set_delivery_status.set(String::from("Food is ready."));
                                     set_was_dispensed.set(true);
                                     let _ = api::track_client_action(
                                         "feed_now_completed",
@@ -110,20 +128,22 @@ where
                                 }
                                 "failed" => {
                                     let message = updated.message.unwrap_or_else(|| {
-                                        String::from("ESP32-C6 did not confirm delivery")
+                                        String::from("The feeder did not confirm delivery")
                                     });
-                                    set_app_state.update(|state| {
-                                        state.push_event(
-                                            String::from("Feed command failed"),
-                                            message.clone(),
-                                            String::from("Just now"),
-                                            EventTone::Warning,
-                                        );
-                                    });
-                                    set_delivery_status.set(format!(
-                                        "Delivery failed after {}/{} attempts.",
-                                        updated.retry_count, updated.max_attempts
-                                    ));
+                                    set_delivery_status
+                                        .set(String::from("Feeder did not confirm feeding."));
+                                    let _ = tauri_api::frontend_action(
+                                        "feed_now_status_failed",
+                                        Some(format!(
+                                            "command_id={}, attempt={}, retry={}/{}, message={}",
+                                            updated.id,
+                                            attempt,
+                                            updated.retry_count,
+                                            updated.max_attempts,
+                                            message
+                                        )),
+                                    )
+                                    .await;
                                     let _ = api::track_client_action(
                                         "feed_now_failed",
                                         Some(format!(
@@ -138,32 +158,48 @@ where
                                     finished = true;
                                     break;
                                 }
-                                "claimed" => {
-                                    set_delivery_status.set(format!(
-                                        "ESP32-C6 claimed command #{}. Attempt {}/{}.",
-                                        updated.id,
-                                        updated.retry_count + 1,
-                                        updated.max_attempts
-                                    ));
-                                }
                                 _ => {
-                                    set_delivery_status.set(format!(
-                                        "Command #{} is queued. Retry {}/{}.",
-                                        updated.id, updated.retry_count, updated.max_attempts
-                                    ));
+                                    let _ = tauri_api::frontend_action(
+                                        "feed_now_status_waiting",
+                                        Some(format!(
+                                            "command_id={}, attempt={}, status={}, retry={}/{}",
+                                            updated.id,
+                                            attempt,
+                                            updated.status,
+                                            updated.retry_count,
+                                            updated.max_attempts
+                                        )),
+                                    )
+                                    .await;
                                 }
                             },
                             Err(error) => {
-                                set_delivery_status
-                                    .set(format!("Could not check command status: {error}"));
+                                let _ = tauri_api::frontend_action(
+                                    "feed_now_status_check_error",
+                                    Some(format!(
+                                        "command_id={}, attempt={}, error={}",
+                                        command.id, attempt, error
+                                    )),
+                                )
+                                .await;
                             }
                         }
                     }
 
                     if !finished {
                         set_delivery_status.set(String::from(
-                            "Still waiting for ESP32-C6 confirmation. Check command status again later.",
+                            "Feeder did not confirm feeding. Check the device.",
                         ));
+                        let _ = tauri_api::frontend_action(
+                            "feed_now_wait_timeout",
+                            Some(format!(
+                                "command_id={}, attempts={}, interval_ms={}",
+                                command.id,
+                                FEED_STATUS_CHECK_ATTEMPTS,
+                                FEED_STATUS_CHECK_INTERVAL_MS
+                            )),
+                        )
+                        .await;
                         let _ = api::track_client_action(
                             "feed_now_wait_timeout",
                             Some(format!("command_id={}", command.id)),
@@ -173,16 +209,41 @@ where
                 }
                 Err(error) => {
                     let detail = error.clone();
-                    set_app_state.update(|state| {
-                        state.push_event(
-                            String::from("Feed command failed"),
-                            error,
-                            String::from("Just now"),
-                            EventTone::Warning,
-                        );
-                    });
-                    set_delivery_status.set(String::from("Could not send feed command."));
-                    let _ = api::track_client_action("feed_now_error", Some(detail)).await;
+                    set_delivery_status.set(String::from(
+                        "Could not send the feeding request. Check the connection.",
+                    ));
+                    let _ = tauri_api::frontend_action(
+                        "feed_now_connection_error",
+                        Some(format!("portion={selected}, error={detail}")),
+                    )
+                    .await;
+
+                    match tauri_api::feed_now_via_tauri(selected).await {
+                        Ok(message) => {
+                            let _ = tauri_api::frontend_action(
+                                "feed_now_direct_fallback_result",
+                                Some(message),
+                            )
+                            .await;
+                            let _ = api::track_client_action(
+                                "feed_now_direct_fallback",
+                                Some(format!("portion={selected}, connection_error={detail}")),
+                            )
+                            .await;
+                        }
+                        Err(direct_error) => {
+                            let _ = tauri_api::frontend_action(
+                                "feed_now_direct_fallback_error",
+                                Some(format!("connection={detail}, direct={direct_error}")),
+                            )
+                            .await;
+                            let _ = api::track_client_action(
+                                "feed_now_error",
+                                Some(format!("connection={detail}, direct={direct_error}")),
+                            )
+                            .await;
+                        }
+                    }
                 }
             }
 
@@ -191,6 +252,7 @@ where
     };
 
     let feed_again = move |_| {
+        tauri_api::report_button_click("feed_again_clicked", None);
         set_was_dispensed.set(false);
         set_delivery_status.set(String::new());
     };
@@ -198,7 +260,13 @@ where
     view! {
         <section class="page">
             <div class="top-bar">
-                <button class="back-button" on:click=move |_| on_back()>
+                <button
+                    class="back-button"
+                    on:click=move |_| {
+                        tauri_api::report_button_click("feed_back_clicked", None);
+                        on_back();
+                    }
+                >
                     "<"
                 </button>
                 <div class="app-title">"Feed Now"</div>
@@ -208,7 +276,7 @@ where
                 if was_dispensed.get() {
                     view! {
                         <div class="success-panel">
-                            <p class="eyebrow">"Command queued"</p>
+                            <p class="eyebrow">"Feeding complete"</p>
                             <h2 class="success-title">
                                 {move || format!("{} was fed", app_state.get().cat_name)}
                             </h2>
@@ -228,7 +296,13 @@ where
                                     <span class="cta-title">"Feed Another Portion"</span>
                                     <span class="cta-copy">"Adjust the amount and dispense again."</span>
                                 </button>
-                                <button class="cta-button cta-primary" on:click=move |_| on_back()>
+                                <button
+                                    class="cta-button cta-primary"
+                                    on:click=move |_| {
+                                        tauri_api::report_button_click("feed_back_home_clicked", None);
+                                        on_back();
+                                    }
+                                >
                                     <span class="cta-title">"Back Home"</span>
                                     <span class="cta-copy">"Return to feeder overview."</span>
                                 </button>

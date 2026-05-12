@@ -11,7 +11,7 @@ use crate::pages::{
     notifications::NotificationsPage,
     settings::SettingsPage,
     setup::{
-        AddFeederPage, BluetoothScanPage, FeederListPage, ServerSetupPage, WifiSetupPage,
+        AddFeederPage, BluetoothScanPage, ConnectionDetailsPage, FeederListPage, WifiSetupPage,
         WifiSetupQuestionPage,
     },
 };
@@ -24,7 +24,7 @@ pub enum Page {
     BluetoothScan,
     WifiSetupQuestion,
     WifiSetup,
-    ServerSetup,
+    ConnectionDetails,
     Home,
     FeedNow,
     Schedule,
@@ -35,16 +35,12 @@ pub enum Page {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum EventTone {
     Success,
-    Warning,
-    Info,
 }
 
 impl EventTone {
     pub fn class_name(self) -> &'static str {
         match self {
             Self::Success => "success",
-            Self::Warning => "warning",
-            Self::Info => "info",
         }
     }
 }
@@ -94,7 +90,7 @@ impl AppState {
                     name: String::from("Barsik feeder"),
                     connection: String::from("Wi-Fi"),
                     status: String::from("Online"),
-                    hopper_level: 78,
+                    hopper_level: 100,
                 },
                 FeederDevice {
                     id: 2,
@@ -109,38 +105,14 @@ impl AppState {
             cat_photo: String::from("assets/image.png"),
             feeder_connected: true,
             notifications_enabled: true,
-            hopper_level: 78,
+            hopper_level: 100,
             last_fed_label: String::from("Today at 12:30 - 2 portions"),
             preferred_portion: 2,
             schedule: Vec::new(),
             schedule_loading: true,
             schedule_error: None,
-            activity: vec![
-                ActivityEvent {
-                    id: 1,
-                    title: String::from("Feeder is online"),
-                    detail: String::from("Wi-Fi connection is stable"),
-                    time: String::from("Now"),
-                    tone: EventTone::Info,
-                },
-                ActivityEvent {
-                    id: 2,
-                    title: String::from("Barsik was fed"),
-                    detail: String::from("Automatic schedule - 2 portions"),
-                    time: String::from("Today at 12:30"),
-                    tone: EventTone::Success,
-                },
-                ActivityEvent {
-                    id: 3,
-                    title: String::from("Schedule storage moved to the server"),
-                    detail: String::from(
-                        "Create meals in Schedule Feeding to save them in the database",
-                    ),
-                    time: String::from("Now"),
-                    tone: EventTone::Info,
-                },
-            ],
-            next_event_id: 4,
+            activity: Vec::new(),
+            next_event_id: 1,
         }
     }
 
@@ -176,15 +148,6 @@ impl AppState {
             String::from("Just now"),
             EventTone::Success,
         );
-
-        if self.hopper_level <= 25 {
-            self.push_event(
-                String::from("Time to refill the feeder"),
-                format!("Only {}% of food remains", self.hopper_level),
-                String::from("Just now"),
-                EventTone::Warning,
-            );
-        }
     }
 
     pub fn push_event(&mut self, title: String, detail: String, time: String, tone: EventTone) {
@@ -201,12 +164,6 @@ impl AppState {
 
     pub fn refill_hopper(&mut self) {
         self.hopper_level = 100;
-        self.push_event(
-            String::from("Hopper refilled"),
-            String::from("Food stock is back to 100%"),
-            String::from("Just now"),
-            EventTone::Info,
-        );
     }
 
     pub fn set_schedules(&mut self, mut schedules: Vec<FeedingSchedule>) {
@@ -247,12 +204,6 @@ impl AppState {
         if let Some(feeder) = self.feeders.iter().find(|feeder| feeder.id == feeder_id) {
             self.hopper_level = feeder.hopper_level;
             self.feeder_connected = feeder.status == "Online";
-            self.push_event(
-                String::from("Feeder selected"),
-                feeder.name.clone(),
-                String::from("Now"),
-                EventTone::Info,
-            );
         }
     }
 
@@ -279,12 +230,6 @@ impl AppState {
         self.schedule.clear();
         self.schedule_loading = false;
         self.schedule_error = None;
-        self.push_event(
-            String::from("Feeder selection cleared"),
-            String::from("Returned to feeder list"),
-            String::from("Now"),
-            EventTone::Info,
-        );
     }
 }
 
@@ -354,13 +299,7 @@ pub fn sync_schedules(set_app_state: WriteSignal<AppState>) {
             }
             Err(error) => {
                 set_app_state.update(|state| {
-                    state.set_schedule_error(error.clone());
-                    state.push_event(
-                        String::from("Schedule sync failed"),
-                        error,
-                        String::from("Now"),
-                        EventTone::Warning,
-                    );
+                    state.set_schedule_error(error);
                 });
             }
         }
@@ -368,6 +307,7 @@ pub fn sync_schedules(set_app_state: WriteSignal<AppState>) {
 }
 
 fn log_client_action(action: &'static str, detail: Option<String>) {
+    crate::tauri_api::report_button_click(action, detail.clone());
     spawn_local(async move {
         let _ = api::track_client_action(action, detail).await;
     });
@@ -411,7 +351,7 @@ pub fn App() -> impl IntoView {
                             <AddFeederPage
                                 on_back=move || set_page.set(Page::FeederList)
                                 on_bluetooth=move || set_page.set(Page::BluetoothScan)
-                                on_wifi=move || set_page.set(Page::ServerSetup)
+                                on_wifi=move || set_page.set(Page::ConnectionDetails)
                             />
                         }
                             .into_any()
@@ -438,16 +378,15 @@ pub fn App() -> impl IntoView {
                     Page::WifiSetup => {
                         view! {
                             <WifiSetupPage
-                                set_app_state=set_app_state
                                 on_back=move || set_page.set(Page::WifiSetupQuestion)
-                                on_connected=move || set_page.set(Page::ServerSetup)
+                                on_connected=move || set_page.set(Page::ConnectionDetails)
                             />
                         }
                             .into_any()
                     }
-                    Page::ServerSetup => {
+                    Page::ConnectionDetails => {
                         view! {
-                            <ServerSetupPage
+                            <ConnectionDetailsPage
                                 set_app_state=set_app_state
                                 on_back=move || set_page.set(Page::AddFeeder)
                                 on_done=move || set_page.set(Page::Home)

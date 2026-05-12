@@ -4,4 +4,8 @@ members = [
     "frontend",
     "backend"
 ]
+exclude = [
+    "src-tauri",
+    "tauri-app/src-tauri"
+]
 resolver = "2"

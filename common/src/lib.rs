@@ -97,3 +97,9 @@ pub struct FeedingReportRequest {
     pub fed_at: Option<String>,
     pub source: String,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClientActionRequest {
+    pub action: String,
+    pub detail: Option<String>,
+}

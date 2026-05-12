@@ -111,6 +111,11 @@ impl Styles {
             grid-template-columns: 1fr;
         }
 
+        .page-home .hero-card {
+            grid-template-columns: 1fr;
+            justify-items: center;
+        }
+
         .hero-copy {
             display: flex;
             flex-direction: column;
@@ -155,7 +160,7 @@ impl Styles {
 
         .home-avatar {
             width: 132px;
-            justify-self: end;
+            justify-self: center;
         }
 
         .home-avatar-image,
@@ -765,6 +770,10 @@ impl Styles {
             border-radius: 18px;
             background: transparent;
             opacity: 0.66;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: visible;
         }
 
         .nav-btn.active {
@@ -777,6 +786,23 @@ impl Styles {
             height: 30px;
             object-fit: contain;
             margin: 0 auto;
+            display: block;
+            max-width: none;
+        }
+
+        .nav-icon-home {
+            width: 91px;
+            height: auto;
+        }
+
+        .nav-icon-notifications {
+            width: 99px;
+            height: auto;
+        }
+
+        .nav-icon-settings {
+            width: 30px;
+            height: 30px;
         }
 
         @media (max-width: 380px) {

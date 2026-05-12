@@ -7,5 +7,7 @@
 /nul
 /frontend/dist
 /frontend/target
+/frontend/target-trunk
+/src-tauri/target
 /.agents
 /.codex

@@ -22,31 +22,42 @@ pub fn NotificationsPage(app_state: ReadSignal<AppState>) -> impl IntoView {
                 </p>
             </div>
 
-            <div class="timeline">
-                <div class="timeline-list">
-                    <For
-                        each=move || app_state.get().activity
-                        key=|item| item.id
-                        children=move |item| {
-                            view! {
-                                <div class="timeline-item">
-                                    <div class="timeline-side">
-                                        <div class=format!("timeline-dot {}", item.tone.class_name())></div>
-                                        <div class="timeline-line"></div>
-                                    </div>
-                                    <div class="timeline-card">
-                                        <div class="timeline-card-header">
-                                            <strong>{item.title}</strong>
-                                            <span>{item.time}</span>
+            <Show
+                when=move || !app_state.get().activity.is_empty()
+                fallback=move || {
+                    view! {
+                        <div class="empty-state">
+                            <p class="empty-title">"No messages yet"</p>
+                        </div>
+                    }
+                }
+            >
+                <div class="timeline">
+                    <div class="timeline-list">
+                        <For
+                            each=move || app_state.get().activity
+                            key=|item| item.id
+                            children=move |item| {
+                                view! {
+                                    <div class="timeline-item">
+                                        <div class="timeline-side">
+                                            <div class=format!("timeline-dot {}", item.tone.class_name())></div>
+                                            <div class="timeline-line"></div>
                                         </div>
-                                        <p>{item.detail}</p>
+                                        <div class="timeline-card">
+                                            <div class="timeline-card-header">
+                                                <strong>{item.title}</strong>
+                                                <span>{item.time}</span>
+                                            </div>
+                                            <p>{item.detail}</p>
+                                        </div>
                                     </div>
-                                </div>
+                                }
                             }
-                        }
-                    />
+                        />
+                    </div>
                 </div>
-            </div>
+            </Show>
         </section>
     }
 }

@@ -3,7 +3,8 @@ use leptos::{ev, prelude::*};
 use wasm_bindgen_futures::spawn_local;
 
 use crate::api;
-use crate::app::{AppState, EventTone, format_schedule_label, portion_text, sync_schedules};
+use crate::app::{AppState, portion_text, sync_schedules};
+use crate::tauri_api;
 
 #[component]
 pub fn SchedulePage<F>(
@@ -32,18 +33,29 @@ where
         move || !selected_date.get().is_empty() && !selected_time.get().is_empty();
 
     let decrease = move |_| {
+        tauri_api::report_button_click("schedule_portion_decrease_clicked", None);
         if portion.get() > 1 {
             set_portion.update(|value| *value -= 1);
         }
     };
 
     let increase = move |_| {
+        tauri_api::report_button_click("schedule_portion_increase_clicked", None);
         if portion.get() < 5 {
             set_portion.update(|value| *value += 1);
         }
     };
 
     let create_schedule = move |_| {
+        tauri_api::report_button_click(
+            "schedule_save_clicked",
+            Some(format!(
+                "date={}, time={}, portion={}",
+                selected_date.get(),
+                selected_time.get(),
+                portion.get()
+            )),
+        );
         if !can_save_schedule() || is_saving.get() {
             return;
         }
@@ -51,7 +63,6 @@ where
         let date = selected_date.get();
         let time = selected_time.get();
         let selected_portion = portion.get();
-        let schedule_time_label = format!("{date} at {time}");
 
         set_is_saving.set(true);
         set_status_message.set(String::new());
@@ -69,31 +80,15 @@ where
                 Ok(schedule) => {
                     set_app_state.update(|state| {
                         state.upsert_schedule(schedule);
-                        state.push_event(
-                            String::from("Scheduled feeding added"),
-                            format!(
-                                "{} - {}",
-                                schedule_time_label,
-                                portion_text(selected_portion)
-                            ),
-                            String::from("Just now"),
-                            EventTone::Success,
-                        );
                     });
                     set_selected_date.set(String::new());
                     set_selected_time.set(String::new());
                     set_portion.set(1);
-                    set_status_message.set(String::from("Feeding saved to the database."));
+                    set_status_message.set(String::from("Feeding schedule saved."));
                 }
                 Err(error) => {
                     set_app_state.update(|state| {
                         state.set_schedule_error(error.clone());
-                        state.push_event(
-                            String::from("Failed to save feeding"),
-                            error.clone(),
-                            String::from("Just now"),
-                            EventTone::Warning,
-                        );
                     });
                     set_status_message.set(format!("Could not save feeding: {error}"));
                 }
@@ -104,13 +99,20 @@ where
     };
 
     let refresh_schedule = move |_| {
+        tauri_api::report_button_click("schedule_refresh_clicked", None);
         sync_schedules(set_app_state);
     };
 
     view! {
         <section class="page">
             <div class="top-bar">
-                <button class="back-button" on:click=move |_| on_back()>
+                <button
+                    class="back-button"
+                    on:click=move |_| {
+                        tauri_api::report_button_click("schedule_back_clicked", None);
+                        on_back();
+                    }
+                >
                     "<"
                 </button>
                 <div class="app-title">"Schedule Feeding"</div>
@@ -189,7 +191,7 @@ where
                         </div>
 
                         <div class="portion-helper">
-                            "This meal will be persisted in PostgreSQL through the Actix-web backend."
+                            "The feeder will use this time for the next scheduled meal."
                         </div>
 
                         <button
@@ -220,12 +222,12 @@ where
                         <p class="panel-subtitle">
                             {move || {
                                 if app_state.get().schedule_loading {
-                                    String::from("Loading from the server...")
+                                    String::from("Loading saved meals...")
                                 } else if let Some(error) = app_state.get().schedule_error {
-                                    format!("Server error: {error}")
+                                    format!("Could not load meals: {error}")
                                 } else {
                                     format!(
-                                        "{} meals stored in the database",
+                                        "{} saved meals",
                                         app_state.get().schedule.len()
                                     )
                                 }
@@ -242,7 +244,7 @@ where
                     fallback=move || {
                         view! {
                             <div class="empty-state">
-                                <p class="empty-title">"Database is empty"</p>
+                                <p class="empty-title">"No saved meals yet"</p>
                                 <p class="empty-copy">
                                     "Create the first scheduled meal above."
                                 </p>
@@ -258,8 +260,6 @@ where
                                 let toggle_id = entry.id;
                                 let delete_id = entry.id;
                                 let new_enabled = !entry.enabled;
-                                let new_enabled_label = if new_enabled { "active" } else { "paused" };
-                                let schedule_label = format_schedule_label(&entry);
                                 let schedule_day_label = entry.feeding_day.clone();
                                 let schedule_detail = format!(
                                     "{} - {} - next {}",
@@ -268,11 +268,11 @@ where
                                     entry.next_run_at
                                 );
 
-                                let toggle_schedule_label = schedule_label.clone();
-                                let delete_schedule_label = schedule_label.clone();
-
                                 let toggle = move |_| {
-                                    let schedule_label = toggle_schedule_label.clone();
+                                    tauri_api::report_button_click(
+                                        "schedule_toggle_clicked",
+                                        Some(format!("id={toggle_id}, enabled={new_enabled}")),
+                                    );
                                     spawn_local(async move {
                                         let payload = UpdateScheduleRequest {
                                             feeding_date: None,
@@ -287,23 +287,11 @@ where
                                             Ok(updated) => {
                                                 set_app_state.update(|state| {
                                                     state.upsert_schedule(updated);
-                                                    state.push_event(
-                                                        String::from("Schedule updated"),
-                                                        format!("{} is now {}", schedule_label, new_enabled_label),
-                                                        String::from("Just now"),
-                                                        EventTone::Info,
-                                                    );
                                                 });
                                             }
                                             Err(error) => {
                                                 set_app_state.update(|state| {
                                                     state.set_schedule_error(error.clone());
-                                                    state.push_event(
-                                                        String::from("Schedule update failed"),
-                                                        error,
-                                                        String::from("Just now"),
-                                                        EventTone::Warning,
-                                                    );
                                                 });
                                             }
                                         }
@@ -311,29 +299,20 @@ where
                                 };
 
                                 let delete = move |_| {
-                                    let schedule_label = delete_schedule_label.clone();
+                                    tauri_api::report_button_click(
+                                        "schedule_delete_clicked",
+                                        Some(format!("id={delete_id}")),
+                                    );
                                     spawn_local(async move {
                                         match api::delete_schedule(delete_id).await {
                                             Ok(()) => {
                                                 set_app_state.update(|state| {
                                                     state.remove_schedule(delete_id);
-                                                    state.push_event(
-                                                        String::from("Scheduled feeding deleted"),
-                                                        schedule_label,
-                                                        String::from("Just now"),
-                                                        EventTone::Warning,
-                                                    );
                                                 });
                                             }
                                             Err(error) => {
                                                 set_app_state.update(|state| {
                                                     state.set_schedule_error(error.clone());
-                                                    state.push_event(
-                                                        String::from("Delete failed"),
-                                                        error,
-                                                        String::from("Just now"),
-                                                        EventTone::Warning,
-                                                    );
                                                 });
                                             }
                                         }
